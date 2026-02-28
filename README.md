@@ -6,7 +6,7 @@
 
 | Topic | Status | Description |
 |-------|--------|-------------|
-| *(尚未新增)* | | |
+| [elevator-system](elevator-system/) | Done | 電梯系統設計（單部狀態機 → SCAN 排程 → 多電梯調度） |
 
 ## 目錄結構
 
