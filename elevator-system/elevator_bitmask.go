@@ -91,7 +91,7 @@ func (e *BitmaskElevator) AddRequest(r Request) {
 		return
 	}
 	if r.Floor == e.CurrentFloor && (e.State == StateIdle || e.State == StateDoorOpen) {
-		e.openDoor()
+		e.openDoor(DirIdle)
 		return
 	}
 
@@ -156,7 +156,7 @@ func (e *BitmaskElevator) stepMove(dir Direction) string {
 
 	msg := fmt.Sprintf("Elevator %d: moved to floor %d", e.ID, e.CurrentFloor)
 	if e.shouldStop(dir) {
-		e.openDoor()
+		e.openDoor(dir)
 		msg += " [STOP — door opening]"
 	}
 	return msg
@@ -192,12 +192,25 @@ func (e *BitmaskElevator) shouldStop(dir Direction) bool {
 	return false
 }
 
-func (e *BitmaskElevator) openDoor() {
+func (e *BitmaskElevator) openDoor(dir Direction) {
 	e.State = StateDoorOpen
 	e.doorTimer = doorOpenSteps
 	bit := e.idx(e.CurrentFloor)
-	clear(&e.upStops, bit)
-	clear(&e.downStops, bit)
+
+	if dir == DirUp || dir == DirIdle {
+		clear(&e.upStops, bit)
+	}
+	if dir == DirDown || dir == DirIdle {
+		clear(&e.downStops, bit)
+	}
+
+	// Turnaround: also clear opposite direction stop.
+	if dir == DirUp && !e.hasStopsAbove() {
+		clear(&e.downStops, bit)
+	}
+	if dir == DirDown && !e.hasStopsBelow() {
+		clear(&e.upStops, bit)
+	}
 }
 
 func (e *BitmaskElevator) pickDirection() {

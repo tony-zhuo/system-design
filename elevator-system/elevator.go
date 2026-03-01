@@ -60,8 +60,8 @@ func (e *Elevator) AddRequest(r Request) {
 		return
 	}
 	if r.Floor == e.CurrentFloor && (e.State == StateIdle || e.State == StateDoorOpen) {
-		// Already at this floor and idle/door-open — open door again
-		e.openDoor()
+		// Already at this floor and idle/door-open — open door, serve both directions.
+		e.openDoor(DirIdle)
 		return
 	}
 
@@ -143,7 +143,7 @@ func (e *Elevator) stepMove(dir Direction) string {
 
 	// Check if we should stop here.
 	if e.shouldStop(dir) {
-		e.openDoor()
+		e.openDoor(dir)
 		msg += " [STOP — door opening]"
 	}
 	return msg
@@ -159,36 +159,52 @@ func (e *Elevator) stepIdle() string {
 		e.ID, e.CurrentFloor, e.Direction)
 }
 
-// shouldStop returns true if the elevator should stop at the current floor.
+// shouldStop reports whether the elevator should stop at the current floor.
+//   - Always stop if the current direction's stop set has this floor.
+//   - At turnaround (no more stops ahead), also stop for the opposite direction's stop.
 func (e *Elevator) shouldStop(dir Direction) bool {
 	i := e.idx(e.CurrentFloor)
 	if dir == DirUp {
 		if e.upStops[i] {
 			return true
 		}
-		// Also stop for cab calls placed in downStops if we're at the
-		// highest requested floor and about to reverse.
-		if !e.hasStopsAbove() && e.downStops[i] {
-			return true
-		}
-	} else {
-		if e.downStops[i] {
-			return true
-		}
-		if !e.hasStopsBelow() && e.upStops[i] {
-			return true
-		}
+		return !e.hasStopsAbove() && e.downStops[i]
 	}
-	return false
+	if e.downStops[i] {
+		return true
+	}
+	return !e.hasStopsBelow() && e.upStops[i]
 }
 
-// openDoor transitions to door-open state and removes the current floor from stops.
-func (e *Elevator) openDoor() {
+// openDoor transitions to door-open state and clears the served stops.
+//
+// Direction-aware clearing:
+//   - DirUp:   clear upStops (intermediate stop serving up passengers)
+//   - DirDown: clear downStops (intermediate stop serving down passengers)
+//   - DirIdle: clear both (idle at this floor)
+//
+// Turnaround: when no more stops ahead in the current direction,
+// also clear the opposite direction's stop (the elevator is reversing
+// and won't revisit this floor in the new direction).
+func (e *Elevator) openDoor(dir Direction) {
 	e.State = StateDoorOpen
 	e.doorTimer = doorOpenSteps
 	i := e.idx(e.CurrentFloor)
-	e.upStops[i] = false
-	e.downStops[i] = false
+
+	if dir == DirUp || dir == DirIdle {
+		e.upStops[i] = false
+	}
+	if dir == DirDown || dir == DirIdle {
+		e.downStops[i] = false
+	}
+
+	// Turnaround: also clear opposite direction stop.
+	if dir == DirUp && !e.hasStopsAbove() {
+		e.downStops[i] = false
+	}
+	if dir == DirDown && !e.hasStopsBelow() {
+		e.upStops[i] = false
+	}
 
 	// Recalculate bounds only if we just removed a boundary floor.
 	if e.CurrentFloor == e.minRequest || e.CurrentFloor == e.maxRequest {

@@ -59,7 +59,7 @@ func (e *BitsetElevator) AddRequest(r Request) {
 		return
 	}
 	if r.Floor == e.CurrentFloor && (e.State == StateIdle || e.State == StateDoorOpen) {
-		e.openDoor()
+		e.openDoor(DirIdle)
 		return
 	}
 
@@ -124,7 +124,7 @@ func (e *BitsetElevator) stepMove(dir Direction) string {
 
 	msg := fmt.Sprintf("Elevator %d: moved to floor %d", e.ID, e.CurrentFloor)
 	if e.shouldStop(dir) {
-		e.openDoor()
+		e.openDoor(dir)
 		msg += " [STOP — door opening]"
 	}
 	return msg
@@ -159,12 +159,25 @@ func (e *BitsetElevator) shouldStop(dir Direction) bool {
 	return false
 }
 
-func (e *BitsetElevator) openDoor() {
+func (e *BitsetElevator) openDoor(dir Direction) {
 	e.State = StateDoorOpen
 	e.doorTimer = doorOpenSteps
 	i := e.idx(e.CurrentFloor)
-	e.upStops.Clear(i)
-	e.downStops.Clear(i)
+
+	if dir == DirUp || dir == DirIdle {
+		e.upStops.Clear(i)
+	}
+	if dir == DirDown || dir == DirIdle {
+		e.downStops.Clear(i)
+	}
+
+	// Turnaround: also clear opposite direction stop.
+	if dir == DirUp && !e.hasStopsAbove() {
+		e.downStops.Clear(i)
+	}
+	if dir == DirDown && !e.hasStopsBelow() {
+		e.upStops.Clear(i)
+	}
 }
 
 func (e *BitsetElevator) pickDirection() {
