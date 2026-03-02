@@ -18,8 +18,10 @@ type Elevator struct {
 	// Index maps directly to floor: index i represents floor (i + MinFloor).
 	// upStops: floors to visit while going up
 	// downStops: floors to visit while going down
-	upStops   []bool
-	downStops []bool
+	cabUpStops    []bool
+	cabDownStops  []bool
+	hallUpStops   []bool
+	hallDownStops []bool
 
 	// Cached boundaries of pending requests for O(1) direction checks.
 	// When no requests: minRequest > maxRequest.
@@ -28,24 +30,32 @@ type Elevator struct {
 
 	// doorTimer counts down steps while the door is open.
 	doorTimer int
+
+	currentWeight int
+	maxWeight     int
 }
 
-const doorOpenSteps = 2 // Number of steps the door stays open
+const doorOpenSteps = 2    // Number of steps the door stays open
+const passengerWeight = 10 // Simulated weight per passenger boarding/alighting
 
 // NewElevator creates an elevator starting at the given floor.
 func NewElevator(id, minFloor, maxFloor int) *Elevator {
 	n := maxFloor - minFloor + 1
 	return &Elevator{
-		ID:           id,
-		CurrentFloor: minFloor,
-		State:        StateIdle,
-		Direction:    DirIdle,
-		MinFloor:     minFloor,
-		MaxFloor:     maxFloor,
-		upStops:      make([]bool, n),
-		downStops:    make([]bool, n),
-		minRequest:   maxFloor + 1, // > maxRequest means empty
-		maxRequest:   minFloor - 1,
+		ID:            id,
+		CurrentFloor:  minFloor,
+		State:         StateIdle,
+		Direction:     DirIdle,
+		MinFloor:      minFloor,
+		MaxFloor:      maxFloor,
+		hallUpStops:   make([]bool, n),
+		hallDownStops: make([]bool, n),
+		cabUpStops:    make([]bool, n),
+		cabDownStops:  make([]bool, n),
+		minRequest:    maxFloor + 1, // > maxRequest means empty
+		maxRequest:    minFloor - 1,
+		currentWeight: 0,
+		maxWeight:     100,
 	}
 }
 
@@ -70,16 +80,16 @@ func (e *Elevator) AddRequest(r Request) {
 	case HallCall:
 		// Hall call: place into the set matching the requested direction.
 		if r.Direction == DirUp {
-			e.upStops[i] = true
+			e.hallUpStops[i] = true
 		} else {
-			e.downStops[i] = true
+			e.hallDownStops[i] = true
 		}
 	case CabCall:
 		// Cab call: place based on relative position and current direction.
 		if r.Floor > e.CurrentFloor {
-			e.upStops[i] = true
+			e.cabUpStops[i] = true
 		} else if r.Floor < e.CurrentFloor {
-			e.downStops[i] = true
+			e.cabDownStops[i] = true
 		}
 	}
 
@@ -164,16 +174,26 @@ func (e *Elevator) stepIdle() string {
 //   - At turnaround (no more stops ahead), also stop for the opposite direction's stop.
 func (e *Elevator) shouldStop(dir Direction) bool {
 	i := e.idx(e.CurrentFloor)
+
+	if e.WeightSensor() {
+		if dir == DirUp && !e.cabUpStops[i] && e.hallUpStops[i] {
+			return false
+		}
+		if dir == DirDown && !e.cabDownStops[i] && e.hallDownStops[i] {
+			return false
+		}
+	}
+
 	if dir == DirUp {
-		if e.upStops[i] {
+		if e.cabUpStops[i] || e.hallUpStops[i] {
 			return true
 		}
-		return !e.hasStopsAbove() && e.downStops[i]
+		return !e.hasStopsAbove() && (e.cabDownStops[i] || e.hallDownStops[i])
 	}
-	if e.downStops[i] {
+	if e.cabDownStops[i] || e.hallDownStops[i] {
 		return true
 	}
-	return !e.hasStopsBelow() && e.upStops[i]
+	return !e.hasStopsBelow() && (e.cabUpStops[i] || e.hallUpStops[i])
 }
 
 // openDoor transitions to door-open state and clears the served stops.
@@ -192,18 +212,51 @@ func (e *Elevator) openDoor(dir Direction) {
 	i := e.idx(e.CurrentFloor)
 
 	if dir == DirUp || dir == DirIdle {
-		e.upStops[i] = false
+		if e.cabUpStops[i] {
+			e.cabUpStops[i] = false
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallUpStops[i] {
+			e.hallUpStops[i] = false
+			e.currentWeight += passengerWeight
+		}
 	}
 	if dir == DirDown || dir == DirIdle {
-		e.downStops[i] = false
+		if e.cabDownStops[i] {
+			e.cabDownStops[i] = false
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallDownStops[i] {
+			e.hallDownStops[i] = false
+			e.currentWeight += passengerWeight
+		}
 	}
 
 	// Turnaround: also clear opposite direction stop.
 	if dir == DirUp && !e.hasStopsAbove() {
-		e.downStops[i] = false
+		if e.cabDownStops[i] {
+			e.cabDownStops[i] = false
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallDownStops[i] {
+			e.hallDownStops[i] = false
+			e.currentWeight += passengerWeight
+		}
 	}
 	if dir == DirDown && !e.hasStopsBelow() {
-		e.upStops[i] = false
+		if e.cabUpStops[i] {
+			e.cabUpStops[i] = false
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallUpStops[i] {
+			e.hallUpStops[i] = false
+			e.currentWeight += passengerWeight
+		}
+	}
+
+	// Clamp weight to non-negative.
+	if e.currentWeight < 0 {
+		e.currentWeight = 0
 	}
 
 	// Recalculate bounds only if we just removed a boundary floor.
@@ -216,8 +269,8 @@ func (e *Elevator) openDoor(dir Direction) {
 func (e *Elevator) recalcBounds() {
 	e.minRequest = e.MaxFloor + 1
 	e.maxRequest = e.MinFloor - 1
-	for i := range e.upStops {
-		if e.upStops[i] || e.downStops[i] {
+	for i := range e.cabUpStops {
+		if e.cabUpStops[i] || e.cabDownStops[i] || e.hallUpStops[i] || e.hallDownStops[i] {
 			floor := i + e.MinFloor
 			if floor < e.minRequest {
 				e.minRequest = floor
@@ -288,30 +341,50 @@ func (e *Elevator) HasPendingRequests() bool {
 // PendingCount returns the total number of pending stops.
 func (e *Elevator) PendingCount() int {
 	count := 0
-	for i := range e.upStops {
-		if e.upStops[i] {
+	for i := range e.cabUpStops {
+		if e.cabUpStops[i] || e.hallUpStops[i] {
 			count++
 		}
 	}
-	for i := range e.downStops {
-		if e.downStops[i] {
+	for i := range e.cabDownStops {
+		if e.cabDownStops[i] || e.hallDownStops[i] {
 			count++
 		}
 	}
 	return count
 }
 
-// StopsSnapshot returns a copy of current stop sets for inspection.
-func (e *Elevator) StopsSnapshot() (up []int, down []int) {
-	for i, v := range e.upStops {
+// StopsCabSnapshot returns a copy of current stop sets for inspection.
+func (e *Elevator) StopsCabSnapshot() (up []int, down []int) {
+	for i, v := range e.cabUpStops {
 		if v {
 			up = append(up, i+e.MinFloor)
 		}
 	}
-	for i, v := range e.downStops {
+	for i, v := range e.cabDownStops {
 		if v {
 			down = append(down, i+e.MinFloor)
 		}
 	}
 	return
+}
+
+// StopsHallSnapshot returns a copy of current stop sets for inspection.
+func (e *Elevator) StopsHallSnapshot() (up []int, down []int) {
+	for i, v := range e.hallUpStops {
+		if v {
+			up = append(up, i+e.MinFloor)
+		}
+	}
+	for i, v := range e.hallDownStops {
+		if v {
+			down = append(down, i+e.MinFloor)
+		}
+	}
+	return
+}
+
+// WeightSensor check is overweight
+func (e *Elevator) WeightSensor() bool {
+	return e.currentWeight >= e.maxWeight
 }

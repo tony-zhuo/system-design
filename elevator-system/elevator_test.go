@@ -178,6 +178,75 @@ func TestElevator_OutOfRangeRequest(t *testing.T) {
 	}
 }
 
+// --- Level 4: Overweight behavior ---
+
+func TestElevator_Overweight_SkipsHallStop(t *testing.T) {
+	e := NewElevator(1, 1, 10)
+	e.currentWeight = e.maxWeight // overweight
+
+	e.AddRequest(Request{Floor: 7, Type: CabCall})
+	e.AddRequest(Request{Floor: 5, Direction: DirUp, Type: HallCall})
+
+	stops := runUntilIdle(e, 100)
+
+	// Normal order would be [5, 7]. Overweight skips hall at 5 on the way up;
+	// after cab exit at 7 weight drops, so 5 is served on the return trip.
+	expected := []int{7, 5}
+	if !intSliceEqual(stops, expected) {
+		t.Errorf("expected %v (hall at 5 skipped on first pass), got %v", expected, stops)
+	}
+}
+
+func TestElevator_Overweight_StillServesCabStop(t *testing.T) {
+	e := NewElevator(1, 1, 10)
+	e.currentWeight = e.maxWeight
+
+	e.AddRequest(Request{Floor: 3, Type: CabCall})
+	e.AddRequest(Request{Floor: 6, Type: CabCall})
+
+	stops := runUntilIdle(e, 100)
+
+	expected := []int{3, 6}
+	if !intSliceEqual(stops, expected) {
+		t.Errorf("expected %v (cab stops unaffected), got %v", expected, stops)
+	}
+}
+
+func TestElevator_Overweight_CabAndHallSameFloor(t *testing.T) {
+	e := NewElevator(1, 1, 10)
+	e.currentWeight = e.maxWeight
+
+	e.AddRequest(Request{Floor: 5, Type: CabCall})
+	e.AddRequest(Request{Floor: 5, Direction: DirUp, Type: HallCall})
+
+	stops := runUntilIdle(e, 100)
+
+	expected := []int{5}
+	if !intSliceEqual(stops, expected) {
+		t.Errorf("expected %v (cab request forces stop), got %v", expected, stops)
+	}
+}
+
+func TestElevator_Overweight_WeightDrop_ResumesHallService(t *testing.T) {
+	e := NewElevator(1, 1, 10)
+	// Near max: after one cab passenger exits (-10), weight drops below max.
+	e.currentWeight = e.maxWeight + passengerWeight - 1 // 109
+
+	e.AddRequest(Request{Floor: 3, Type: CabCall})
+	e.AddRequest(Request{Floor: 5, Direction: DirUp, Type: HallCall})
+	e.AddRequest(Request{Floor: 7, Type: CabCall})
+
+	stops := runUntilIdle(e, 100)
+
+	// At floor 3: cab exit → weight drops to 99 (< 100) → no longer overweight.
+	// At floor 5: hall stop now served normally.
+	// At floor 7: cab stop.
+	expected := []int{3, 5, 7}
+	if !intSliceEqual(stops, expected) {
+		t.Errorf("expected %v (weight drops at 3, resumes hall at 5), got %v", expected, stops)
+	}
+}
+
 func intSliceEqual(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
