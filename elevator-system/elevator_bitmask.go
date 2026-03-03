@@ -15,7 +15,7 @@ import (
 //   - hasStopsAbove / hasStopsBelow become O(1) bit masking instead of O(n) loop
 //   - HasPendingRequests is O(1): just check bits != 0
 //   - PendingCount is O(1): bits.OnesCount64
-//   - Memory: 2 × 8 bytes = 16 bytes vs 2 × N bytes for []bool
+//   - Memory: 4 × 8 bytes = 32 bytes vs 4 × N bytes for []bool
 type BitmaskElevator struct {
 	ID           int
 	CurrentFloor int
@@ -24,10 +24,15 @@ type BitmaskElevator struct {
 	MinFloor     int
 	MaxFloor     int
 
-	upStops   uint64 // bitmask: bit i = floor (i + MinFloor) needs stop going up
-	downStops uint64 // bitmask: bit i = floor (i + MinFloor) needs stop going down
+	cabUpStops    uint64 // bitmask: cab calls going up
+	cabDownStops  uint64 // bitmask: cab calls going down
+	hallUpStops   uint64 // bitmask: hall calls going up
+	hallDownStops uint64 // bitmask: hall calls going down
 
 	doorTimer int
+
+	currentWeight int
+	maxWeight     int
 }
 
 const bitmaskMaxFloors = 64
@@ -45,6 +50,7 @@ func NewBitmaskElevator(id, minFloor, maxFloor int) *BitmaskElevator {
 		Direction:    DirIdle,
 		MinFloor:     minFloor,
 		MaxFloor:     maxFloor,
+		maxWeight:    100,
 	}
 }
 
@@ -99,15 +105,15 @@ func (e *BitmaskElevator) AddRequest(r Request) {
 	switch r.Type {
 	case HallCall:
 		if r.Direction == DirUp {
-			set(&e.upStops, bit)
+			set(&e.hallUpStops, bit)
 		} else {
-			set(&e.downStops, bit)
+			set(&e.hallDownStops, bit)
 		}
 	case CabCall:
 		if r.Floor > e.CurrentFloor {
-			set(&e.upStops, bit)
+			set(&e.cabUpStops, bit)
 		} else if r.Floor < e.CurrentFloor {
-			set(&e.downStops, bit)
+			set(&e.cabDownStops, bit)
 		}
 	}
 
@@ -174,18 +180,28 @@ func (e *BitmaskElevator) stepIdle() string {
 // shouldStop — O(1) with bitmask operations.
 func (e *BitmaskElevator) shouldStop(dir Direction) bool {
 	bit := e.idx(e.CurrentFloor)
+
+	if e.WeightSensor() {
+		if dir == DirUp && !has(e.cabUpStops, bit) && has(e.hallUpStops, bit) {
+			return false
+		}
+		if dir == DirDown && !has(e.cabDownStops, bit) && has(e.hallDownStops, bit) {
+			return false
+		}
+	}
+
 	if dir == DirUp {
-		if has(e.upStops, bit) {
+		if has(e.cabUpStops, bit) || has(e.hallUpStops, bit) {
 			return true
 		}
-		if !e.hasStopsAbove() && has(e.downStops, bit) {
+		if !e.hasStopsAbove() && (has(e.cabDownStops, bit) || has(e.hallDownStops, bit)) {
 			return true
 		}
 	} else {
-		if has(e.downStops, bit) {
+		if has(e.cabDownStops, bit) || has(e.hallDownStops, bit) {
 			return true
 		}
-		if !e.hasStopsBelow() && has(e.upStops, bit) {
+		if !e.hasStopsBelow() && (has(e.cabUpStops, bit) || has(e.hallUpStops, bit)) {
 			return true
 		}
 	}
@@ -198,18 +214,51 @@ func (e *BitmaskElevator) openDoor(dir Direction) {
 	bit := e.idx(e.CurrentFloor)
 
 	if dir == DirUp || dir == DirIdle {
-		clear(&e.upStops, bit)
+		if has(e.cabUpStops, bit) {
+			clear(&e.cabUpStops, bit)
+			e.currentWeight -= passengerWeight
+		}
+		if has(e.hallUpStops, bit) {
+			clear(&e.hallUpStops, bit)
+			e.currentWeight += passengerWeight
+		}
 	}
 	if dir == DirDown || dir == DirIdle {
-		clear(&e.downStops, bit)
+		if has(e.cabDownStops, bit) {
+			clear(&e.cabDownStops, bit)
+			e.currentWeight -= passengerWeight
+		}
+		if has(e.hallDownStops, bit) {
+			clear(&e.hallDownStops, bit)
+			e.currentWeight += passengerWeight
+		}
 	}
 
 	// Turnaround: also clear opposite direction stop.
 	if dir == DirUp && !e.hasStopsAbove() {
-		clear(&e.downStops, bit)
+		if has(e.cabDownStops, bit) {
+			clear(&e.cabDownStops, bit)
+			e.currentWeight -= passengerWeight
+		}
+		if has(e.hallDownStops, bit) {
+			clear(&e.hallDownStops, bit)
+			e.currentWeight += passengerWeight
+		}
 	}
 	if dir == DirDown && !e.hasStopsBelow() {
-		clear(&e.upStops, bit)
+		if has(e.cabUpStops, bit) {
+			clear(&e.cabUpStops, bit)
+			e.currentWeight -= passengerWeight
+		}
+		if has(e.hallUpStops, bit) {
+			clear(&e.hallUpStops, bit)
+			e.currentWeight += passengerWeight
+		}
+	}
+
+	// Clamp weight to non-negative.
+	if e.currentWeight < 0 {
+		e.currentWeight = 0
 	}
 }
 
@@ -254,36 +303,57 @@ func (e *BitmaskElevator) pickDirection() {
 // hasStopsAbove — O(1): mask off bits above current floor, check != 0.
 func (e *BitmaskElevator) hasStopsAbove() bool {
 	mask := aboveMask(e.idx(e.CurrentFloor))
-	return (e.upStops|e.downStops)&mask != 0
+	return (e.cabUpStops|e.cabDownStops|e.hallUpStops|e.hallDownStops)&mask != 0
 }
 
 // hasStopsBelow — O(1): mask off bits below current floor, check != 0.
 func (e *BitmaskElevator) hasStopsBelow() bool {
 	mask := belowMask(e.idx(e.CurrentFloor))
-	return (e.upStops|e.downStops)&mask != 0
+	return (e.cabUpStops|e.cabDownStops|e.hallUpStops|e.hallDownStops)&mask != 0
 }
 
 // HasPendingRequests — O(1): just check if any bit is set.
 func (e *BitmaskElevator) HasPendingRequests() bool {
-	return (e.upStops | e.downStops) != 0
+	return (e.cabUpStops | e.cabDownStops | e.hallUpStops | e.hallDownStops) != 0
 }
 
 // PendingCount — O(1): popcount via bits.OnesCount64.
 func (e *BitmaskElevator) PendingCount() int {
-	return bits.OnesCount64(e.upStops) + bits.OnesCount64(e.downStops)
+	return bits.OnesCount64(e.cabUpStops) + bits.OnesCount64(e.cabDownStops) +
+		bits.OnesCount64(e.hallUpStops) + bits.OnesCount64(e.hallDownStops)
 }
 
-// StopsSnapshot returns the floors in each stop set.
-func (e *BitmaskElevator) StopsSnapshot() (up []int, down []int) {
-	for b := e.upStops; b != 0; {
-		i := bits.TrailingZeros64(b) // lowest set bit
+// StopsCabSnapshot returns the cab stop floors in each direction.
+func (e *BitmaskElevator) StopsCabSnapshot() (up []int, down []int) {
+	for b := e.cabUpStops; b != 0; {
+		i := bits.TrailingZeros64(b)
 		up = append(up, i+e.MinFloor)
-		b &= b - 1 // clear lowest set bit
+		b &= b - 1
 	}
-	for b := e.downStops; b != 0; {
+	for b := e.cabDownStops; b != 0; {
 		i := bits.TrailingZeros64(b)
 		down = append(down, i+e.MinFloor)
 		b &= b - 1
 	}
 	return
+}
+
+// StopsHallSnapshot returns the hall stop floors in each direction.
+func (e *BitmaskElevator) StopsHallSnapshot() (up []int, down []int) {
+	for b := e.hallUpStops; b != 0; {
+		i := bits.TrailingZeros64(b)
+		up = append(up, i+e.MinFloor)
+		b &= b - 1
+	}
+	for b := e.hallDownStops; b != 0; {
+		i := bits.TrailingZeros64(b)
+		down = append(down, i+e.MinFloor)
+		b &= b - 1
+	}
+	return
+}
+
+// WeightSensor check is overweight
+func (e *BitmaskElevator) WeightSensor() bool {
+	return e.currentWeight >= e.maxWeight
 }

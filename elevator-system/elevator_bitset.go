@@ -26,24 +26,32 @@ type BitsetElevator struct {
 	MinFloor     int
 	MaxFloor     int
 
-	upStops   *bitset.BitSet
-	downStops *bitset.BitSet
+	cabUpStops    *bitset.BitSet
+	cabDownStops  *bitset.BitSet
+	hallUpStops   *bitset.BitSet
+	hallDownStops *bitset.BitSet
 
 	doorTimer int
+
+	currentWeight int
+	maxWeight     int
 }
 
 // NewBitsetElevator creates an elevator using bitset stops.
 func NewBitsetElevator(id, minFloor, maxFloor int) *BitsetElevator {
 	n := uint(maxFloor - minFloor + 1)
 	return &BitsetElevator{
-		ID:           id,
-		CurrentFloor: minFloor,
-		State:        StateIdle,
-		Direction:    DirIdle,
-		MinFloor:     minFloor,
-		MaxFloor:     maxFloor,
-		upStops:      bitset.New(n),
-		downStops:    bitset.New(n),
+		ID:            id,
+		CurrentFloor:  minFloor,
+		State:         StateIdle,
+		Direction:     DirIdle,
+		MinFloor:      minFloor,
+		MaxFloor:      maxFloor,
+		cabUpStops:    bitset.New(n),
+		cabDownStops:  bitset.New(n),
+		hallUpStops:   bitset.New(n),
+		hallDownStops: bitset.New(n),
+		maxWeight:     100,
 	}
 }
 
@@ -67,15 +75,15 @@ func (e *BitsetElevator) AddRequest(r Request) {
 	switch r.Type {
 	case HallCall:
 		if r.Direction == DirUp {
-			e.upStops.Set(i)
+			e.hallUpStops.Set(i)
 		} else {
-			e.downStops.Set(i)
+			e.hallDownStops.Set(i)
 		}
 	case CabCall:
 		if r.Floor > e.CurrentFloor {
-			e.upStops.Set(i)
+			e.cabUpStops.Set(i)
 		} else if r.Floor < e.CurrentFloor {
-			e.downStops.Set(i)
+			e.cabDownStops.Set(i)
 		}
 	}
 
@@ -141,18 +149,28 @@ func (e *BitsetElevator) stepIdle() string {
 
 func (e *BitsetElevator) shouldStop(dir Direction) bool {
 	i := e.idx(e.CurrentFloor)
+
+	if e.WeightSensor() {
+		if dir == DirUp && !e.cabUpStops.Test(i) && e.hallUpStops.Test(i) {
+			return false
+		}
+		if dir == DirDown && !e.cabDownStops.Test(i) && e.hallDownStops.Test(i) {
+			return false
+		}
+	}
+
 	if dir == DirUp {
-		if e.upStops.Test(i) {
+		if e.cabUpStops.Test(i) || e.hallUpStops.Test(i) {
 			return true
 		}
-		if !e.hasStopsAbove() && e.downStops.Test(i) {
+		if !e.hasStopsAbove() && (e.cabDownStops.Test(i) || e.hallDownStops.Test(i)) {
 			return true
 		}
 	} else {
-		if e.downStops.Test(i) {
+		if e.cabDownStops.Test(i) || e.hallDownStops.Test(i) {
 			return true
 		}
-		if !e.hasStopsBelow() && e.upStops.Test(i) {
+		if !e.hasStopsBelow() && (e.cabUpStops.Test(i) || e.hallUpStops.Test(i)) {
 			return true
 		}
 	}
@@ -165,18 +183,51 @@ func (e *BitsetElevator) openDoor(dir Direction) {
 	i := e.idx(e.CurrentFloor)
 
 	if dir == DirUp || dir == DirIdle {
-		e.upStops.Clear(i)
+		if e.cabUpStops.Test(i) {
+			e.cabUpStops.Clear(i)
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallUpStops.Test(i) {
+			e.hallUpStops.Clear(i)
+			e.currentWeight += passengerWeight
+		}
 	}
 	if dir == DirDown || dir == DirIdle {
-		e.downStops.Clear(i)
+		if e.cabDownStops.Test(i) {
+			e.cabDownStops.Clear(i)
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallDownStops.Test(i) {
+			e.hallDownStops.Clear(i)
+			e.currentWeight += passengerWeight
+		}
 	}
 
 	// Turnaround: also clear opposite direction stop.
 	if dir == DirUp && !e.hasStopsAbove() {
-		e.downStops.Clear(i)
+		if e.cabDownStops.Test(i) {
+			e.cabDownStops.Clear(i)
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallDownStops.Test(i) {
+			e.hallDownStops.Clear(i)
+			e.currentWeight += passengerWeight
+		}
 	}
 	if dir == DirDown && !e.hasStopsBelow() {
-		e.upStops.Clear(i)
+		if e.cabUpStops.Test(i) {
+			e.cabUpStops.Clear(i)
+			e.currentWeight -= passengerWeight
+		}
+		if e.hallUpStops.Test(i) {
+			e.hallUpStops.Clear(i)
+			e.currentWeight += passengerWeight
+		}
+	}
+
+	// Clamp weight to non-negative.
+	if e.currentWeight < 0 {
+		e.currentWeight = 0
 	}
 }
 
@@ -219,14 +270,19 @@ func (e *BitsetElevator) pickDirection() {
 }
 
 // hasStopsAbove uses NextSet to find the first set bit above the current floor.
-// NextSet returns the next set bit >= the given index, so we query from idx+1.
 func (e *BitsetElevator) hasStopsAbove() bool {
 	start := e.idx(e.CurrentFloor) + 1
 	n := uint(e.MaxFloor - e.MinFloor + 1)
-	if upNext, ok := e.upStops.NextSet(start); ok && upNext < n {
+	if next, ok := e.cabUpStops.NextSet(start); ok && next < n {
 		return true
 	}
-	if downNext, ok := e.downStops.NextSet(start); ok && downNext < n {
+	if next, ok := e.cabDownStops.NextSet(start); ok && next < n {
+		return true
+	}
+	if next, ok := e.hallUpStops.NextSet(start); ok && next < n {
+		return true
+	}
+	if next, ok := e.hallDownStops.NextSet(start); ok && next < n {
 		return true
 	}
 	return false
@@ -238,10 +294,16 @@ func (e *BitsetElevator) hasStopsBelow() bool {
 	if cur == 0 {
 		return false
 	}
-	if upNext, ok := e.upStops.NextSet(0); ok && upNext < cur {
+	if next, ok := e.cabUpStops.NextSet(0); ok && next < cur {
 		return true
 	}
-	if downNext, ok := e.downStops.NextSet(0); ok && downNext < cur {
+	if next, ok := e.cabDownStops.NextSet(0); ok && next < cur {
+		return true
+	}
+	if next, ok := e.hallUpStops.NextSet(0); ok && next < cur {
+		return true
+	}
+	if next, ok := e.hallDownStops.NextSet(0); ok && next < cur {
 		return true
 	}
 	return false
@@ -249,22 +311,41 @@ func (e *BitsetElevator) hasStopsBelow() bool {
 
 // HasPendingRequests — checks if any bit is set.
 func (e *BitsetElevator) HasPendingRequests() bool {
-	return e.upStops.Any() || e.downStops.Any()
+	return e.cabUpStops.Any() || e.cabDownStops.Any() ||
+		e.hallUpStops.Any() || e.hallDownStops.Any()
 }
 
 // PendingCount returns the total number of pending stops.
 func (e *BitsetElevator) PendingCount() int {
-	return int(e.upStops.Count() + e.downStops.Count())
+	return int(e.cabUpStops.Count() + e.cabDownStops.Count() +
+		e.hallUpStops.Count() + e.hallDownStops.Count())
 }
 
-// StopsSnapshot returns the floors in each stop set.
-func (e *BitsetElevator) StopsSnapshot() (up []int, down []int) {
+// StopsCabSnapshot returns the cab stop floors in each direction.
+func (e *BitsetElevator) StopsCabSnapshot() (up []int, down []int) {
 	n := uint(e.MaxFloor - e.MinFloor + 1)
-	for i, ok := e.upStops.NextSet(0); ok && i < n; i, ok = e.upStops.NextSet(i + 1) {
+	for i, ok := e.cabUpStops.NextSet(0); ok && i < n; i, ok = e.cabUpStops.NextSet(i + 1) {
 		up = append(up, int(i)+e.MinFloor)
 	}
-	for i, ok := e.downStops.NextSet(0); ok && i < n; i, ok = e.downStops.NextSet(i + 1) {
+	for i, ok := e.cabDownStops.NextSet(0); ok && i < n; i, ok = e.cabDownStops.NextSet(i + 1) {
 		down = append(down, int(i)+e.MinFloor)
 	}
 	return
+}
+
+// StopsHallSnapshot returns the hall stop floors in each direction.
+func (e *BitsetElevator) StopsHallSnapshot() (up []int, down []int) {
+	n := uint(e.MaxFloor - e.MinFloor + 1)
+	for i, ok := e.hallUpStops.NextSet(0); ok && i < n; i, ok = e.hallUpStops.NextSet(i + 1) {
+		up = append(up, int(i)+e.MinFloor)
+	}
+	for i, ok := e.hallDownStops.NextSet(0); ok && i < n; i, ok = e.hallDownStops.NextSet(i + 1) {
+		down = append(down, int(i)+e.MinFloor)
+	}
+	return
+}
+
+// WeightSensor check is overweight
+func (e *BitsetElevator) WeightSensor() bool {
+	return e.currentWeight >= e.maxWeight
 }
